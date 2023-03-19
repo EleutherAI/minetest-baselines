@@ -1,6 +1,13 @@
 from setuptools import setup
 
-UTILS = ['wandb', 'tensorboardX', 'opencv-python']
+UTILS = [
+    'wandb',
+    'tensorboardX',
+    'tensorboard',
+    'opencv-python',
+    'imageio-ffmpeg',
+    'jax-smi',
+]
 TORCH = ['torch', 'stable-baselines3']
 JAX = ['jax', 'optax', 'flax']
 
