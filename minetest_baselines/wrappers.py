@@ -6,6 +6,27 @@ from minetester.minetest_env import Minetest
 from minetester.utils import KEY_MAP, NOOP_ACTION
 
 
+class AlwaysDig(MinetestWrapper):
+    def step(self, action):
+        action["DIG"] = True
+        obs, rew, done, info = self.env.step(action)
+        return obs, rew, done, info
+
+
+class PenalizeJumping(MinetestWrapper):
+    def __init__(self, env, jump_penalty=0.01):
+        super().__init__(env)
+        self.jump_penalty = jump_penalty
+
+    def step(self, action):
+        penalty = 0
+        if action["JUMP"]:
+            penalty = -self.jump_penalty
+        obs, rew, done, info = self.env.step(action)
+        rew += penalty
+        return obs, rew, done, info
+
+
 class FlattenMultiDiscreteActions(gym.Wrapper):
     def __init__(self, env: gym.Env):
         assert isinstance(env.action_space, gym.spaces.MultiDiscrete)
@@ -43,14 +64,13 @@ class DictToMultiDiscreteActions(gym.Wrapper):
         return self.env.step(dict_action)
 
 
-class GroupKeyActions(gym.Wrapper):
+class GroupKeyActions(MinetestWrapper):
     def __init__(
         self,
         env: gym.Env,
         groups: List[Set[str]],
     ):
-        assert isinstance(env.unwrapped, Minetest), \
-            "This wrapper operates on Minetest environments."
+        super().__init__(env)
         total_keys = 0
         for group in groups:
             for key in group:
@@ -58,7 +78,6 @@ class GroupKeyActions(gym.Wrapper):
                 total_keys += 1
         assert len(set().union(*groups)) == total_keys, \
             "Keys can only belong to one key group!"
-        super().__init__(env)
         self.groups = groups
         self.grouped_keys = set().union(*groups)
         key_group_spaces = {
@@ -86,17 +105,15 @@ class GroupKeyActions(gym.Wrapper):
         return self.env.step(ungrouped_action)
 
 
-class SelectKeyActions(gym.Wrapper):
+class SelectKeyActions(MinetestWrapper):
     def __init__(
         self,
         env: gym.Env,
         select_keys: Set[str] = KEY_MAP.keys(),
     ):
-        assert isinstance(env.unwrapped, Minetest), \
-            "This wrapper operates on Minetest environments."
+        super().__init__(env)
         for key in select_keys:
             assert key in KEY_MAP, f"Selected key '{key}' is not supported."
-        super().__init__(env)
         self.selected_keys = select_keys
         self.action_space = gym.spaces.Dict(
             {
@@ -111,7 +128,7 @@ class SelectKeyActions(gym.Wrapper):
         return self.env.step(full_action)
 
 
-class DiscreteMouseAction(gym.Wrapper):
+class DiscreteMouseAction(MinetestWrapper):
     def __init__(
         self,
         env: gym.Env,
@@ -120,8 +137,6 @@ class DiscreteMouseAction(gym.Wrapper):
         quantization_scheme: str = "linear",
         mu: float = 5.,
     ):
-        assert isinstance(env.unwrapped, Minetest), \
-            "This wrapper operates on Minetest environments."
         super().__init__(env)
         self.max_mouse_move = max_mouse_move
         self.num_mouse_actions = num_mouse_bins**2
@@ -178,6 +193,13 @@ class DiscreteMouseAction(gym.Wrapper):
         undisc_mouse_action = self.undiscretize(xy_action)
         action["MOUSE"] = undisc_mouse_action.astype(int)
         return self.env.step(action)
+
+
+class MinetestWrapper(gym.Wrapper):
+    def __init__(self, env):
+        assert isinstance(env.unwrapped, Minetest), \
+            "This wrapper only works on Minetest environments."
+        super().__init__(env)
 
 
 if __name__ == "__main__":
