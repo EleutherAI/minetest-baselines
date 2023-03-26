@@ -14,7 +14,7 @@ from typing import Sequence
 import flax
 import flax.linen as nn
 import gym
-import minetest_baselines.register_wrapped_envs  # noqa
+import minetest_baselines.register_tasks  # noqa
 from minetester.utils import start_xserver
 import jax
 import jax.numpy as jnp
@@ -23,6 +23,7 @@ import optax
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 from tensorboardX import SummaryWriter
+from jax_smi import initialise_tracking
 
 
 def parse_args():
@@ -52,13 +53,13 @@ def parse_args():
         help="the user or org name of the model repository from the Hugging Face Hub")
 
     # Algorithm specific arguments
-    parser.add_argument("--env-id", type=str, default="minetester-wrapped-treechop-v0",
+    parser.add_argument("--env-id", type=str, default="minetester-treechop_shaped-v0",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=10000000,
+    parser.add_argument("--total-timesteps", type=int, default=5000000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
-    parser.add_argument("--num-envs", type=int, default=2,
+    parser.add_argument("--num-envs", type=int, default=8,
         help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=128,
         help="the number of steps to run in each environment per policy rollout")
@@ -96,7 +97,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
         env = gym.make(
             env_id,
-            seed=seed,
+            base_seed=seed + idx,
             headless=True,
             start_xvfb=False,
             env_port=5555 + idx,
@@ -104,10 +105,12 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         )
         if capture_video:
             if idx == 0:
-                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        env.seed(seed)
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
+                env = gym.wrappers.RecordVideo(
+                    env, f"videos/{run_name}", lambda x: x % 50 == 0
+                )
+        #env.seed(seed)
+        env.action_space.seed(seed + idx)
+        env.observation_space.seed(seed + idx)
         return env
 
     return thunk
@@ -220,7 +223,7 @@ if __name__ == "__main__":
     key, network_key, actor_key, critic_key = jax.random.split(key, 4)
 
     # env setup
-    xserver = start_xserver(4)
+    xserver = start_xserver(0)
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.env_id, args.seed, i, args.capture_video, run_name) for i in range(args.num_envs)]
     )
@@ -466,6 +469,7 @@ if __name__ == "__main__":
         return agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, key
 
     # TRY NOT TO MODIFY: start the game
+    initialise_tracking()
     global_step = 0
     start_time = time.time()
     next_obs = envs.reset()

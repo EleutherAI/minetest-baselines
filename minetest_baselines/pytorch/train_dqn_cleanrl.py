@@ -6,7 +6,7 @@ import time
 from distutils.util import strtobool
 
 import gym
-import minetest_baselines.register_wrapped_envs  # noqa
+import minetest_baselines.register_tasks  # noqa
 import numpy as np
 import torch
 import torch.nn as nn
@@ -43,7 +43,7 @@ def parse_args():
         help="the user or org name of the model repository from the Hugging Face Hub")
 
     # Algorithm specific arguments
-    parser.add_argument("--env-id", type=str, default="minetester-wrapped-treechop-v0",
+    parser.add_argument("--env-id", type=str, default="minetester-treechop-v0",
         help="the id of the environment")
     parser.add_argument("--total-timesteps", type=int, default=500000,
         help="total timesteps of the experiments")
@@ -69,6 +69,8 @@ def parse_args():
         help="timestep to start learning")
     parser.add_argument("--train-frequency", type=int, default=10,
         help="the frequency of training")
+    parser.add_argument("--num-envs", type=int, default=1,
+        help="the number of environments to sample from")
     args = parser.parse_args()
     # fmt: on
     return args
@@ -76,7 +78,14 @@ def parse_args():
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
-        env = gym.make(env_id, seed=seed)
+        env = gym.make(
+            env_id,
+            world_seed=seed,
+            start_xvfb=False,
+            headless=True,
+            env_port=5555 + idx,
+            server_port=30000 + idx,
+        )
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
             if idx == 0:
@@ -145,7 +154,8 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    xserver = start_xserver(0)
+    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, idx, args.capture_video, run_name) for idx in range(args.num_envs)])
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     q_network = QNetwork(envs).to(device)
@@ -159,6 +169,7 @@ if __name__ == "__main__":
         envs.single_action_space,
         device,
         handle_timeout_termination=True,
+        n_envs=args.num_envs,
     )
     start_time = time.time()
 
@@ -190,7 +201,10 @@ if __name__ == "__main__":
         for idx, d in enumerate(dones):
             if d:
                 real_next_obs[idx] = infos[idx]["terminal_observation"]
-        rb.add(obs, real_next_obs, actions, rewards, dones, infos)
+        for idx in range(obs.shape[0]):
+            rb.add(obs[idx], real_next_obs[idx], actions[idx], rewards[idx], dones[idx], np.array([infos[idx]]))
+
+
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -223,33 +237,11 @@ if __name__ == "__main__":
                         args.tau * q_network_param.data + (1.0 - args.tau) * target_network_param.data
                     )
 
-    """
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save(q_network.state_dict(), model_path)
         print(f"model saved to {model_path}")
-        from cleanrl_utils.evals.dqn_eval import evaluate
-
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=QNetwork,
-            device=device,
-            epsilon=0.05,
-        )
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
-
-        if args.upload_model:
-            from cleanrl_utils.huggingface import push_to_hub
-
-            repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
-            repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(args, episodic_returns, repo_id, "DQN", f"runs/{run_name}", f"videos/{run_name}-eval")
-    """
 
     envs.close()
+    xserver.terminate()
     writer.close()

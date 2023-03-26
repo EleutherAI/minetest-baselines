@@ -10,7 +10,7 @@ import flax.linen as nn
 import gym
 import jax
 import jax.numpy as jnp
-import minetest_baselines.register_wrapped_envs  # noqa
+import minetest_baselines.register_tasks  # noqa
 from minetester.utils import start_xserver
 import numpy as np
 import optax
@@ -42,7 +42,7 @@ def parse_args():
         help="the user or org name of the model repository from the Hugging Face Hub")
 
     # Algorithm specific arguments
-    parser.add_argument("--env-id", type=str, default="minetester-wrapped-treechop_shaped-v0",
+    parser.add_argument("--env-id", type=str, default="minetester-treechop_shaped-v0",
         help="the id of the environment")
     parser.add_argument("--total-timesteps", type=int, default=1000000,
         help="total timesteps of the experiments")
@@ -80,7 +80,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         # TODO train agent on diverse seeds / biomes / conditions
         env = gym.make(
             env_id,
-            seed=seed,
+            world_seed=seed,
             start_xvfb=False,
             headless=True,
             env_port=5555 + idx,
