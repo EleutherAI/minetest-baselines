@@ -1,11 +1,14 @@
 import gym
-from gym.wrappers import (FrameStack, GrayScaleObservation,
-                          ResizeObservation, TimeLimit)
+from gym.wrappers import FrameStack, GrayScaleObservation, ResizeObservation, TimeLimit
 from minetester.minetest_env import Minetest
-from minetest_baselines.wrappers import (DictToMultiDiscreteActions,
-                                 DiscreteMouseAction,
-                                 FlattenMultiDiscreteActions, GroupKeyActions,
-                                 SelectKeyActions, PenalizeJumping, AlwaysDig)
+from minetest_baselines.wrappers import (
+    DictToMultiDiscreteActions,
+    DiscreteMouseAction,
+    FlattenMultiDiscreteActions,
+    SelectKeyActions,
+    PenalizeJumping,
+    AlwaysDig,
+)
 
 
 def wrapped_treechop_env(**kwargs):
@@ -23,10 +26,7 @@ def wrapped_treechop_env(**kwargs):
     # make breaking blocks easier to learn
     env = AlwaysDig(env)
     # only allow basic movements
-    env = SelectKeyActions(
-        env,
-        select_keys={"FORWARD", "JUMP"}
-    )
+    env = SelectKeyActions(env, select_keys={"FORWARD", "JUMP"})
     # jumping usually interrupts progress towards
     # breaking nodes; apply penalty to learn faster
     env = PenalizeJumping(env, 0.01)
@@ -52,5 +52,5 @@ for task, version, entry_point in TASKS:
     gym.register(
         f"minetester-{task}-v{version}",
         entry_point=f"{entry_point.__module__}:{entry_point.__name__}",
-        kwargs=dict(clientmods=[f"{task}_v{version}"])
+        kwargs=dict(clientmods=[f"{task}_v{version}"]),
     )

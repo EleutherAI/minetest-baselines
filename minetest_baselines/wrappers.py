@@ -6,6 +6,13 @@ from minetester.minetest_env import Minetest
 from minetester.utils import KEY_MAP, NOOP_ACTION
 
 
+class MinetestWrapper(gym.Wrapper):
+    def __init__(self, env):
+        assert isinstance(env.unwrapped, Minetest), \
+            "This wrapper only works on Minetest environments."
+        super().__init__(env)
+
+
 class AlwaysDig(MinetestWrapper):
     def step(self, action):
         action["DIG"] = True
@@ -193,13 +200,6 @@ class DiscreteMouseAction(MinetestWrapper):
         undisc_mouse_action = self.undiscretize(xy_action)
         action["MOUSE"] = undisc_mouse_action.astype(int)
         return self.env.step(action)
-
-
-class MinetestWrapper(gym.Wrapper):
-    def __init__(self, env):
-        assert isinstance(env.unwrapped, Minetest), \
-            "This wrapper only works on Minetest environments."
-        super().__init__(env)
 
 
 if __name__ == "__main__":
