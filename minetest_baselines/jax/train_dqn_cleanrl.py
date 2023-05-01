@@ -4,6 +4,8 @@ import os
 import random
 import time
 from distutils.util import strtobool
+from typing import Callable
+import psutil
 
 import flax
 import flax.linen as nn
@@ -18,6 +20,7 @@ from flax.training.train_state import TrainState
 from stable_baselines3.common.buffers import ReplayBuffer
 from tensorboardX import SummaryWriter
 from jax_smi import initialise_tracking
+
 
 def parse_args():
     # fmt: off
@@ -88,7 +91,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         )
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
-            if idx == 0:
+            if idx == 0 or idx < 0:
                 env = gym.wrappers.RecordVideo(env, f"videos/{run_name}", lambda x: x % 100 == 0)
         env.seed(seed)
         env.action_space.seed(seed)
@@ -96,6 +99,44 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         return env
 
     return thunk
+
+
+def evaluate(
+    model_path: str,
+    make_env: Callable,
+    env_id: str,
+    eval_episodes: int,
+    run_name: str,
+    Model: nn.Module,
+    epsilon: float = 0.05,
+    capture_video: bool = True,
+    seed=1,
+):
+    envs = gym.vector.SyncVectorEnv([make_env(env_id, seed, -1, capture_video, run_name)])
+    obs = envs.reset()
+    model = Model(action_dim=envs.single_action_space.n)
+    q_key = jax.random.PRNGKey(seed)
+    params = model.init(q_key, obs)
+    with open(model_path, "rb") as f:
+        params = flax.serialization.from_bytes(params, f.read())
+    model.apply = jax.jit(model.apply)
+
+    episodic_returns = []
+    while len(episodic_returns) < eval_episodes:
+        if random.random() < epsilon:
+            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+        else:
+            q_values = model.apply(params, obs)
+            actions = q_values.argmax(axis=-1)
+            actions = jax.device_get(actions)
+        next_obs, _, _, infos = envs.step(actions)
+        for info in infos:
+            if "episode" in info.keys():
+                print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
+                episodic_returns += [info["episode"]["r"]]
+        obs = next_obs
+
+    return episodic_returns
 
 
 # ALGO LOGIC: initialize agent here:
@@ -301,12 +342,41 @@ if __name__ == "__main__":
                     )
                 )
 
+    # Close training envs
+    envs.close()
+    # kill any remaining minetest processes
+    for proc in psutil.process_iter():
+        if proc.name() in ["minetest"]:
+            proc.kill()
+
     if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+        model_path = f"runs/{run_name}/{args.exp_name}.model"
         with open(model_path, "wb") as f:
             f.write(flax.serialization.to_bytes(q_state.params))
         print(f"model saved to {model_path}")
 
-    envs.close()
+        episodic_returns = evaluate(
+            model_path,
+            make_env,
+            args.env_id,
+            eval_episodes=1,
+            run_name=f"{run_name}-eval",
+            Model=QNetwork,
+            epsilon=0.05,
+            seed=args.seed,
+        )
+        for idx, episodic_return in enumerate(episodic_returns):
+            writer.add_scalar("eval/episodic_return", episodic_return, idx)
+
+
+        if args.upload_model:
+            from minetest_baselines.huggingface import push_to_hub
+
+            repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
+            repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
+            push_to_hub(args, episodic_returns, repo_id, "DQN", f"runs/{run_name}", f"videos/{run_name}-eval")
+
+
+
     xserver.terminate()
     writer.close()

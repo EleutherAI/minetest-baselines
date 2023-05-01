@@ -3,9 +3,10 @@ import argparse
 import os
 import random
 import time
+import psutil
 from distutils.util import strtobool
 from functools import partial
-from typing import Sequence
+from typing import Sequence, Callable
 
 #os.environ[
 #    "XLA_PYTHON_CLIENT_MEM_FRACTION"
@@ -104,7 +105,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             server_port=30000 + idx,
         )
         if capture_video:
-            if idx == 0:
+            if idx == 0 or idx < 0:
                 env = gym.wrappers.RecordVideo(
                     env, f"videos/{run_name}", lambda x: x % 50 == 0
                 )
@@ -114,6 +115,68 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         return env
 
     return thunk
+
+
+def evaluate(
+    model_path: str,
+    make_env: Callable,
+    env_id: str,
+    eval_episodes: int,
+    run_name: str,
+    Model: nn.Module,
+    capture_video: bool = True,
+    seed=1,
+):
+    envs = gym.vector.SyncVectorEnv([make_env(env_id, seed, -1, capture_video, run_name)])
+    Network, Actor, Critic = Model
+    next_obs = envs.reset()
+    network = Network()
+    actor = Actor(action_dim=envs.single_action_space.n)
+    critic = Critic()
+    key = jax.random.PRNGKey(seed)
+    key, network_key, actor_key, critic_key = jax.random.split(key, 4)
+    network_params = network.init(network_key, np.array([envs.single_observation_space.sample()]))
+    actor_params = actor.init(actor_key, network.apply(network_params, np.array([envs.single_observation_space.sample()])))
+    critic_params = critic.init(critic_key, network.apply(network_params, np.array([envs.single_observation_space.sample()])))
+    # note: critic_params is not used in this script
+    with open(model_path, "rb") as f:
+        (args, (network_params, actor_params, critic_params)) = flax.serialization.from_bytes(
+            (None, (network_params, actor_params, critic_params)), f.read()
+        )
+
+    @jax.jit
+    def get_action_and_value(
+        network_params: flax.core.FrozenDict,
+        actor_params: flax.core.FrozenDict,
+        next_obs: np.ndarray,
+        key: jax.random.PRNGKey,
+    ):
+        hidden = network.apply(network_params, next_obs)
+        logits = actor.apply(actor_params, hidden)
+        # sample action: Gumbel-softmax trick
+        # see https://stats.stackexchange.com/questions/359442/sampling-from-a-categorical-distribution
+        key, subkey = jax.random.split(key)
+        u = jax.random.uniform(subkey, shape=logits.shape)
+        action = jnp.argmax(logits - jnp.log(-jnp.log(u)), axis=1)
+        return action, key
+
+    # a simple non-vectorized version
+    episodic_returns = []
+    for episode in range(eval_episodes):
+        episodic_return = 0
+        next_obs = envs.reset()
+        terminated = False
+
+        while not terminated:
+            actions, key = get_action_and_value(network_params, actor_params, next_obs, key)
+            next_obs, reward, terminated, infos = envs.step(np.array(actions))
+            episodic_return += reward[0]
+
+            if terminated[0]:
+                print(f"eval_episode={len(episodic_returns)}, episodic_return={episodic_return}")
+                episodic_returns.append(episodic_return)
+
+    return episodic_returns
 
 
 @flax.struct.dataclass
@@ -282,11 +345,10 @@ if __name__ == "__main__":
             dict_ret[key] = key_ar
         return dict_ret
 
-    def step_env_wrappeed(episode_stats, action):
+    def step_env_wrapped(episode_stats, action):
         (next_obs, reward, next_done, info) = envs.step(action)
         info = array2dict(info)
-        # TODO why is info['reward'] used here?
-        new_episode_return = episode_stats.episode_returns + reward  # info["reward"]
+        new_episode_return = episode_stats.episode_returns + reward
         new_episode_length = episode_stats.episode_lengths + 1
 
         episode_stats = episode_stats.replace(
@@ -500,7 +562,7 @@ if __name__ == "__main__":
             storage, action, key = get_action_and_value(agent_state, next_obs, next_done, storage, step, key)
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            episode_stats, (next_obs, reward, next_done, _) = step_env_wrappeed(episode_stats, action)
+            episode_stats, (next_obs, reward, next_done, _) = step_env_wrapped(episode_stats, action)
             storage = storage.replace(rewards=storage.rewards.at[step].set(reward))
         return agent_state, episode_stats, next_obs, next_done, storage, key, global_step
 
@@ -535,6 +597,49 @@ if __name__ == "__main__":
             "charts/SPS_update", int(args.num_envs * args.num_steps / (time.time() - update_time_start)), global_step
         )
 
+
+    # Close training envs
     envs.close()
+    # kill any remaining minetest processes
+    for proc in psutil.process_iter():
+        if proc.name() in ["minetest"]:
+            proc.kill()
+
+    if args.save_model:
+        model_path = f"runs/{run_name}/{args.exp_name}.model"
+        with open(model_path, "wb") as f:
+            f.write(
+                flax.serialization.to_bytes(
+                    [
+                        vars(args),
+                        [
+                            agent_state.params.network_params,
+                            agent_state.params.actor_params,
+                            agent_state.params.critic_params,
+                        ],
+                    ]
+                )
+            )
+        print(f"model saved to {model_path}")
+
+        episodic_returns = evaluate(
+            model_path,
+            make_env,
+            args.env_id,
+            eval_episodes=10,
+            run_name=f"{run_name}-eval",
+            Model=(Network, Actor, Critic),
+        )
+        for idx, episodic_return in enumerate(episodic_returns):
+            writer.add_scalar("eval/episodic_return", episodic_return, idx)
+
+        if args.upload_model:
+            from minetest_baselines.huggingface import push_to_hub
+
+            repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
+            repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
+            push_to_hub(args, episodic_returns, repo_id, "PPO", f"runs/{run_name}", f"videos/{run_name}-eval")
+
+
     xserver.terminate()
     writer.close()
