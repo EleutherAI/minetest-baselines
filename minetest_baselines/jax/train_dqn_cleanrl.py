@@ -200,7 +200,7 @@ if __name__ == "__main__":
     key, q_key = jax.random.split(key, 2)
 
     # env setup
-    xserver = start_xserver(0)
+    xserver = start_xserver(4)
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.env_id, args.seed, i, args.capture_video, run_name) for i in range(args.num_envs)]
     )
