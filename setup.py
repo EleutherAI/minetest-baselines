@@ -7,6 +7,7 @@ UTILS = [
     'opencv-python',
     'imageio-ffmpeg',
     'jax-smi',
+    'protobuf==3.20.1',
 ]
 TORCH = ['torch', 'stable-baselines3']
 JAX = ['jax', 'optax', 'flax']
