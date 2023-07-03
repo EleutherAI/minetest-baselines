@@ -2,6 +2,7 @@ from setuptools import setup
 
 UTILS = [
     'wandb',
+    'huggingface_hub',
     'tensorboardX',
     'tensorboard',
     'opencv-python',
@@ -11,6 +12,7 @@ UTILS = [
 ]
 TORCH = ['torch', 'stable-baselines3']
 JAX = ['jax', 'optax', 'flax']
+DEV = ['pre-commit', 'black', 'isort', 'flake8']
 
 setup(
     name='Minetest Baselines',
@@ -23,4 +25,5 @@ setup(
         'minetester>=0.0.1',
         *UTILS, *TORCH, *JAX
     ],
+    extras_require={'dev': DEV},
 )
