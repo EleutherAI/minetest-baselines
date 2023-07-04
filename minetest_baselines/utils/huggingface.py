@@ -1,3 +1,4 @@
+# adapted from cleanRL: https://github.com/vwxyzjn/cleanrl
 import argparse
 import sys
 from pathlib import Path
@@ -44,18 +45,17 @@ def push_to_hub(
     ]
 
     # Step 3: Generate the model card
-    algorithm_variant_filename = sys.argv[0].split("/")[-1]
     model_card = f"""
 #**{algo_name}** Agent Playing **{args.env_id}**
 
 This is a trained model of a {algo_name} agent playing {args.env_id}.
-The model was trained by using [minetest-baselines](https://github.com/EleutherAI/minetest-baselines).
-
+The model was trained by using
+[minetest-baselines](https://github.com/EleutherAI/minetest-baselines).
 
 ## Command to reproduce the training
 
 ```bash
-python -m minetest_baselines.jax.{algorithm_variant_filename} {" ".join(sys.argv[1:])}
+python -m minetest_baselines.train {" ".join(sys.argv[1:])}
 ```
 
 # Hyperparameters
@@ -74,18 +74,21 @@ python -m minetest_baselines.jax.{algorithm_variant_filename} {" ".join(sys.argv
         "reinforcement-learning",
         "custom-implementation",
     ]
-    metadata["library_name"] = "cleanrl"
-    eval = metadata_eval_result(
+    metadata["library_name"] = "minetest-baselines"
+    avg_return = (
+        f"{np.average(episodic_returns):.2f} +/- {np.std(episodic_returns):.2f}",
+    )[0]
+    metadata_eval = metadata_eval_result(
         model_pretty_name=algo_name,
         task_pretty_name="reinforcement-learning",
         task_id="reinforcement-learning",
         metrics_pretty_name="mean_reward",
         metrics_id="mean_reward",
-        metrics_value=f"{np.average(episodic_returns):.2f} +/- {np.std(episodic_returns):.2f}",
+        metrics_value=avg_return,
         dataset_pretty_name=args.env_id,
         dataset_id=args.env_id,
     )
-    metadata = {**metadata, **eval}
+    metadata = {**metadata, **metadata_eval}
 
     with open(readme_path, "w", encoding="utf-8") as f:
         f.write(readme)
@@ -96,26 +99,30 @@ python -m minetest_baselines.jax.{algorithm_variant_filename} {" ".join(sys.argv
         # Push all video files
         video_files = list(Path(video_folder_path).glob("*.mp4"))
         if len(video_files) > 0:
-            operations += [CommitOperationAdd(path_or_fileobj=str(file), path_in_repo=str(file)) for file in video_files]
+            operations += [
+                CommitOperationAdd(path_or_fileobj=str(file), path_in_repo=str(file))
+                for file in video_files
+            ]
             # Push latest one in root directory
-            latest_file = max(video_files, key=lambda file: int("".join(filter(str.isdigit, file.stem))))
+            latest_file = max(
+                video_files,
+                key=lambda file: int("".join(filter(str.isdigit, file.stem))),
+            )
             operations.append(
-                CommitOperationAdd(path_or_fileobj=str(latest_file), path_in_repo=HUGGINGFACE_VIDEO_PREVIEW_FILE_NAME)
+                CommitOperationAdd(
+                    path_or_fileobj=str(latest_file),
+                    path_in_repo=HUGGINGFACE_VIDEO_PREVIEW_FILE_NAME,
+                ),
             )
 
     # fetch folder files
     operations += [
-        CommitOperationAdd(path_or_fileobj=str(item), path_in_repo=str(item.relative_to(folder_path)))
+        CommitOperationAdd(
+            path_or_fileobj=str(item),
+            path_in_repo=str(item.relative_to(folder_path)),
+        )
         for item in Path(folder_path).glob("*")
     ]
-
-    # fetch source code
-    #operations.append(CommitOperationAdd(path_or_fileobj=sys.argv[0], path_in_repo=sys.argv[0].split("/")[-1]))
-
-    # upload poetry files at the root of the repository
-    #git_root = Path(__file__).parent.parent
-    #operations.append(CommitOperationAdd(path_or_fileobj=str(git_root / "pyproject.toml"), path_in_repo="pyproject.toml"))
-    #operations.append(CommitOperationAdd(path_or_fileobj=str(git_root / "poetry.lock"), path_in_repo="poetry.lock"))
 
     api.create_commit(
         repo_id=repo_id,

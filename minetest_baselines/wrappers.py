@@ -8,8 +8,10 @@ from minetester.utils import KEY_MAP, NOOP_ACTION
 
 class MinetestWrapper(gym.Wrapper):
     def __init__(self, env):
-        assert isinstance(env.unwrapped, Minetest), \
-            "This wrapper only works on Minetest environments."
+        assert isinstance(
+            env.unwrapped,
+            Minetest,
+        ), "This wrapper only works on Minetest environments."
         super().__init__(env)
 
 
@@ -42,8 +44,8 @@ class FlattenMultiDiscreteActions(gym.Wrapper):
         self.action_space = gym.spaces.Discrete(np.prod(self.action_shape))
 
     def step(self, action):
-        multidisc_action = np.array(np.unravel_index(action, self.action_shape))
-        return self.env.step(multidisc_action)
+        multidisc_action = np.unravel_index(action, self.action_shape)
+        return self.env.step(np.array(multidisc_action))
 
 
 class DictToMultiDiscreteActions(gym.Wrapper):
@@ -66,7 +68,7 @@ class DictToMultiDiscreteActions(gym.Wrapper):
         dict_action = {}
         pointer = 0
         for key, dim in self.space_dims.items():
-            dict_action[key] = action[pointer:pointer + dim].squeeze()
+            dict_action[key] = action[pointer : pointer + dim].squeeze()
             pointer += dim
         return self.env.step(dict_action)
 
@@ -81,10 +83,11 @@ class GroupKeyActions(MinetestWrapper):
         total_keys = 0
         for group in groups:
             for key in group:
-                assert key in KEY_MAP, f"Selected key '{key}' is not supported."
+                assert key in KEY_MAP, f"Selected key '{key}' not supported."
                 total_keys += 1
-        assert len(set().union(*groups)) == total_keys, \
-            "Keys can only belong to one key group!"
+        assert (
+            len(set().union(*groups)) == total_keys
+        ), "Keys can only belong to one key group!"
         self.groups = groups
         self.grouped_keys = set().union(*groups)
         key_group_spaces = {
@@ -93,9 +96,11 @@ class GroupKeyActions(MinetestWrapper):
         }
         self.action_space = gym.spaces.Dict(
             {
-                **{key: space
-                   for key, space in self.env.action_space.items()
-                   if key not in self.grouped_keys},
+                **{
+                    key: space
+                    for key, space in self.env.action_space.items()
+                    if key not in self.grouped_keys
+                },
                 **key_group_spaces,
             },
         )
@@ -142,7 +147,7 @@ class DiscreteMouseAction(MinetestWrapper):
         num_mouse_bins: int = 5,
         max_mouse_move: int = 50,
         quantization_scheme: str = "linear",
-        mu: float = 5.,
+        mu: float = 5.0,
     ):
         super().__init__(env)
         self.max_mouse_move = max_mouse_move
@@ -155,8 +160,11 @@ class DiscreteMouseAction(MinetestWrapper):
         self.mouse_action_space = gym.spaces.Discrete(self.num_mouse_actions)
         self.action_space = gym.spaces.Dict(
             {
-                **{key: space
-                   for key, space in self.env.action_space.items() if key != "MOUSE"},
+                **{
+                    key: space
+                    for key, space in self.env.action_space.items()
+                    if key != "MOUSE"
+                },
                 **{"MOUSE": self.mouse_action_space},
             },
         )
@@ -172,9 +180,7 @@ class DiscreteMouseAction(MinetestWrapper):
             v_encode *= self.max_mouse_move
             xy = v_encode
 
-        return np.round((xy + self.max_mouse_move) / self.bin_size).astype(
-            np.int64
-        )
+        return np.round((xy + self.max_mouse_move) / self.bin_size).astype(np.int64)
 
     def undiscretize(self, xy):
         xy = xy * self.bin_size - self.max_mouse_move
@@ -195,7 +201,7 @@ class DiscreteMouseAction(MinetestWrapper):
         if mouse_action.shape == ():
             mouse_action = mouse_action[None]
         xy_action = np.concatenate(
-            np.unravel_index(mouse_action, (self.num_mouse_bins, self.num_mouse_bins))
+            np.unravel_index(mouse_action, (self.num_mouse_bins, self.num_mouse_bins)),
         )
         undisc_mouse_action = self.undiscretize(xy_action)
         action["MOUSE"] = undisc_mouse_action.astype(int)
@@ -230,13 +236,10 @@ if __name__ == "__main__":
     # Only use a subset of the available keys
     env = SelectKeyActions(
         env,
-        select_keys={"FORWARD", "BACKWARD", "LEFT", "RIGHT", "JUMP", "DIG"}
+        select_keys={"FORWARD", "BACKWARD", "LEFT", "RIGHT", "JUMP", "DIG"},
     )
     # Combine mutually exclusive actions into key groups
-    env = GroupKeyActions(
-        env,
-        groups=[{"FORWARD", "BACKWARD"}, {"LEFT", "RIGHT"}]
-    )
+    env = GroupKeyActions(env, groups=[{"FORWARD", "BACKWARD"}, {"LEFT", "RIGHT"}])
 
     env = DictToMultiDiscreteActions(env)
     env = FlattenMultiDiscreteActions(env)

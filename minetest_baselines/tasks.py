@@ -1,13 +1,14 @@
 import gym
 from gym.wrappers import FrameStack, GrayScaleObservation, ResizeObservation, TimeLimit
 from minetester.minetest_env import Minetest
+
 from minetest_baselines.wrappers import (
+    AlwaysDig,
     DictToMultiDiscreteActions,
     DiscreteMouseAction,
     FlattenMultiDiscreteActions,
-    SelectKeyActions,
     PenalizeJumping,
-    AlwaysDig,
+    SelectKeyActions,
 )
 
 

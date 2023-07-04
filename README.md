@@ -2,51 +2,40 @@
 Baseline scripts for solving Minetest tasks.
 
 ## Algorithms
-Implemented:
 - DQN
-
-Planned:
 - PPO
-- Recurrent PPO with LSTM or TransformerXL
-- DreamerVX
-
 
 ## Tasks
-Implemented:
-- Treechop
-
-Planned:
-- collect a diverse set of items
-- everything else
+- minetester-treechop-v0
+- minetester-treechop-v1
+- minetester-treechop_shaped-v0
 
 ## Dependencies
-- Minetest
-- cleanRL
-- PyTorch: stable-baselines3
-- jax: rlax
+- minetester
+- torch
+- jax
+- stable-baselines3
 
 ## Installation
 - Clone and compile https://github.com/EleutherAI/minetest into `MINETEST_DIR`
-- Clone this repo and run
-    - `conda create -f environment.yml`
-    - `conda activate minetest-baselines`
+- Clone this repo into the parent folder of `MINETEST_DIR`, enter it and run
+    - `conda create -n mtb python=3.8`
+    - `conda activate mtb`
+    - `pip install -e .`
 
 ## Usage
-- Training from scratch
+Training from scratch:
 ```python
-python train.py --algo ALGO_NAME --task TASK_NAME --minetest MINETEST_DIR
+python -m minetest_baselines.train --algo ALGO_NAME --task TASK_NAME --SOME_PARAM ...
 ```
-- Evaluate pretrained models
-```python
-python eval.py --algo ALGO_NAME --task TASK_NAME
+Show help for algorithm parameters:
 ```
+python -m minetest_baselines.train --algo --help
+```
+When tracking experiments and uploading models, make sure to export wandb and huggingface tokens or to login using `wandb login` and `huggingface-cli login`.
 
-## Results
-
-TODO
-
-
-## Roadmap
-
-- [ ] Test cleanRL DQN training scripts and adapt to our needs
-- [ ] Add custom algorithms and more tasks
+## Contributing
+Please raise an issue before creating a pull request.
+To install developer tools run
+- `pip install -e .[dev]`
+- `pre-commit install`
