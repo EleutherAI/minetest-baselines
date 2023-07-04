@@ -185,6 +185,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             headless=True,
             env_port=5555 + idx,
             server_port=30000 + idx,
+            x_display=4,
         )
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:

@@ -223,6 +223,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             start_xvfb=False,
             env_port=5555 + idx,
             server_port=30000 + idx,
+            x_display=4,
         )
         if capture_video:
             if idx == 0 or idx < 0:
