@@ -1,5 +1,9 @@
 # Data
 data/*
+events.out.*
+videos/*
+wandb/*
+runs
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -130,3 +134,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# VSCode
+.vscode
