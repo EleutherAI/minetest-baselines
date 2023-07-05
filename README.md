@@ -30,7 +30,7 @@ python -m minetest_baselines.train --algo ALGO_NAME --task TASK_NAME --SOME_PARA
 ```
 Show help for algorithm parameters:
 ```
-python -m minetest_baselines.train --algo --help
+python -m minetest_baselines.train --algo ALGO_NAME --help
 ```
 When tracking experiments and uploading models, make sure to export wandb and huggingface tokens or to login using `wandb login` and `huggingface-cli login`.
 
