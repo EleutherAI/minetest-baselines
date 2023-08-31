@@ -9,6 +9,7 @@ UTILS = [
     "imageio-ffmpeg",
     "jax-smi",
     "protobuf==3.20.1",
+    "moviepy",
 ]
 TORCH = ["torch", "stable-baselines3"]
 JAX = ["jax", "optax", "flax"]

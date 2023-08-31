@@ -1,6 +1,6 @@
 from typing import List, Set
 
-import gym
+import gymnasium as gym
 import numpy as np
 from minetester.minetest_env import Minetest
 from minetester.utils import KEY_MAP, NOOP_ACTION
@@ -18,8 +18,8 @@ class MinetestWrapper(gym.Wrapper):
 class AlwaysDig(MinetestWrapper):
     def step(self, action):
         action["DIG"] = True
-        obs, rew, done, info = self.env.step(action)
-        return obs, rew, done, info
+        obs, rew, done, truncated, info = self.env.step(action)
+        return obs, rew, done, truncated, info
 
 
 class PenalizeJumping(MinetestWrapper):
@@ -31,9 +31,9 @@ class PenalizeJumping(MinetestWrapper):
         penalty = 0
         if action["JUMP"]:
             penalty = -self.jump_penalty
-        obs, rew, done, info = self.env.step(action)
+        obs, rew, done, truncated, info = self.env.step(action)
         rew += penalty
-        return obs, rew, done, info
+        return obs, rew, done, truncated, info
 
 
 class FlattenMultiDiscreteActions(gym.Wrapper):

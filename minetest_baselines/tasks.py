@@ -1,5 +1,10 @@
-import gym
-from gym.wrappers import FrameStack, GrayScaleObservation, ResizeObservation, TimeLimit
+import gymnasium as gym
+from gymnasium.wrappers import (
+    FrameStack,
+    GrayScaleObservation,
+    ResizeObservation,
+    TimeLimit,
+)
 from minetester.minetest_env import Minetest
 
 from minetest_baselines.wrappers import (
@@ -53,5 +58,5 @@ for task, version, entry_point in TASKS:
     gym.register(
         f"minetester-{task}-v{version}",
         entry_point=f"{entry_point.__module__}:{entry_point.__name__}",
-        kwargs=dict(clientmods=[f"{task}_v{version}"]),
+        kwargs=dict(clientmods=[f"{task}_v{version}"], render_mode="rgb_array"),
     )

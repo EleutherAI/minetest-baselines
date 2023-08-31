@@ -9,7 +9,7 @@ from typing import Callable, Sequence
 
 import flax
 import flax.linen as nn
-import gym
+import gymnasium as gym
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -253,7 +253,7 @@ def evaluate(
         [make_env(env_id, seed, -1, capture_video, run_name)],
     )
     Network, Actor, Critic = Model
-    next_obs = envs.reset()
+    next_obs, _ = envs.reset()
     network = Network()
     actor = Actor(action_dim=envs.single_action_space.n)
     critic = Critic()
@@ -308,20 +308,23 @@ def evaluate(
     episodic_returns = []
     for episode in range(eval_episodes):
         episodic_return = 0
-        next_obs = envs.reset()
-        terminated = False
+        next_obs, _ = envs.reset()
+        terminated = np.array([False])
+        truncated = np.array([False])
 
-        while not terminated:
+        while not (terminated[0] or truncated[0]):
             actions, key = get_action_and_value(
                 network_params,
                 actor_params,
                 next_obs,
                 key,
             )
-            next_obs, reward, terminated, infos = envs.step(np.array(actions))
+            next_obs, reward, terminated, truncated, infos = envs.step(
+                np.array(actions),
+            )
             episodic_return += reward[0]
 
-            if terminated[0]:
+            if terminated[0] or truncated[0]:
                 print(
                     f"eval_episode={len(episodic_returns)},"
                     f"episodic_return={episodic_return}",
@@ -517,41 +520,27 @@ def train(args=None):
     actor.apply = jax.jit(actor.apply)
     critic.apply = jax.jit(critic.apply)
 
-    def array2dict(array):
-        keys = ["terminated", "TimeLimit.truncated"]
-        dict_ret = {}
-        for key in keys:
-            key_ar = []
-            for di in array:
-                if key in di:
-                    key_ar.append(di[key])
-                else:
-                    key_ar.append(False)
-            key_ar = np.array(key_ar)
-            dict_ret[key] = key_ar
-        return dict_ret
-
     def step_env_wrapped(episode_stats, action):
-        (next_obs, reward, next_done, info) = envs.step(action)
-        info = array2dict(info)
+        (next_obs, reward, next_done, next_truncated, info) = envs.step(action)
+
         new_episode_return = episode_stats.episode_returns + reward
         new_episode_length = episode_stats.episode_lengths + 1
 
         episode_stats = episode_stats.replace(
             episode_returns=(new_episode_return)
-            * (1 - info["terminated"])
-            * (1 - info["TimeLimit.truncated"]),
+            * (1 - next_done)
+            * (1 - next_truncated),
             episode_lengths=(new_episode_length)
-            * (1 - info["terminated"])
-            * (1 - info["TimeLimit.truncated"]),
+            * (1 - next_done)
+            * (1 - next_truncated),
             # only update the `returned_episode_returns` if the episode is done
             returned_episode_returns=jnp.where(
-                info["terminated"] + info["TimeLimit.truncated"],
+                next_done + next_truncated,
                 new_episode_return,
                 episode_stats.returned_episode_returns,
             ),
             returned_episode_lengths=jnp.where(
-                info["terminated"] + info["TimeLimit.truncated"],
+                next_done + next_truncated,
                 new_episode_length,
                 episode_stats.returned_episode_lengths,
             ),
@@ -731,7 +720,7 @@ def train(args=None):
     initialise_tracking()
     global_step = 0
     start_time = time.time()
-    next_obs = envs.reset()
+    next_obs, _ = envs.reset()
     next_done = jnp.zeros(args.num_envs, dtype=jax.numpy.bool_)
 
     # FIXME readd @jax.jit
@@ -859,7 +848,7 @@ def train(args=None):
             model_path,
             make_env,
             args.env_id,
-            eval_episodes=10,
+            eval_episodes=1,
             run_name=f"{run_name}-eval",
             Model=(Network, Actor, Critic),
         )
