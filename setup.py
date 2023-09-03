@@ -1,7 +1,7 @@
 from setuptools import setup
 
 UTILS = [
-    "wandb",
+    "wandb>=0.13.11",  # ensure gymnasium support
     "huggingface_hub",
     "tensorboardX",
     "tensorboard",
