@@ -521,18 +521,19 @@ def train(args=None):
     critic.apply = jax.jit(critic.apply)
 
     def step_env_wrapped(episode_stats, action):
-        (next_obs, reward, next_done, next_truncated, info) = envs.step(action)
+        (next_obs, reward, next_done, next_truncated, _) = envs.step(action)
+        reward = reward.astype(jnp.float32)
 
         new_episode_return = episode_stats.episode_returns + reward
         new_episode_length = episode_stats.episode_lengths + 1
 
         episode_stats = episode_stats.replace(
-            episode_returns=(new_episode_return)
+            episode_returns=(new_episode_return
             * (1 - next_done)
-            * (1 - next_truncated),
-            episode_lengths=(new_episode_length)
+            * (1 - next_truncated)).astype(jnp.float32),
+            episode_lengths=(new_episode_length
             * (1 - next_done)
-            * (1 - next_truncated),
+            * (1 - next_truncated)).astype(jnp.int32),
             # only update the `returned_episode_returns` if the episode is done
             returned_episode_returns=jnp.where(
                 next_done + next_truncated,
@@ -545,7 +546,7 @@ def train(args=None):
                 episode_stats.returned_episode_lengths,
             ),
         )
-        return episode_stats, (next_obs, reward, next_done, info)
+        return episode_stats, (next_obs, reward, next_done)
 
     # ALGO Logic: Storage setup
     storage = Storage(
@@ -720,10 +721,14 @@ def train(args=None):
     initialise_tracking()
     global_step = 0
     start_time = time.time()
+    # define dummy reward for using io callback
+    dummy_reward = jnp.zeros(args.num_envs, dtype=jnp.float32)
+    envs.reset()
+    # intial reset of the environments
     next_obs, _ = envs.reset()
-    next_done = jnp.zeros(args.num_envs, dtype=jax.numpy.bool_)
+    next_done = jnp.zeros(args.num_envs, dtype=jnp.bool_)
 
-    # FIXME readd @jax.jit
+    @jax.jit
     def rollout(
         agent_state,
         episode_stats,
@@ -745,11 +750,15 @@ def train(args=None):
             )
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            episode_stats, (next_obs, reward, next_done, _) = step_env_wrapped(
-                episode_stats,
-                action,
-            )
-            storage = storage.replace(rewards=storage.rewards.at[step].set(reward))
+            # TODO make minetester return float32 rewards
+            with jax.experimental.enable_x64():
+                episode_stats, (next_obs, reward, next_done) = jax.experimental.io_callback(
+                    step_env_wrapped,
+                    (episode_stats, (next_obs, dummy_reward, next_done)),
+                    episode_stats,
+                    action,
+                )
+                storage = storage.replace(rewards=storage.rewards.at[step].set(reward))
         return (
             agent_state,
             episode_stats,
