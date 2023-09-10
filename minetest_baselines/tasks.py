@@ -14,6 +14,7 @@ from minetest_baselines.wrappers import (
     FlattenMultiDiscreteActions,
     PenalizeJumping,
     SelectKeyActions,
+    ToFloat32Reward,
 )
 
 
@@ -22,11 +23,11 @@ def wrapped_treechop_env(**kwargs):
         **kwargs,
     )
     env = TimeLimit(env, 500)
-    # action space wrappers
+    # simplify mouse actions
     env = DiscreteMouseAction(
         env,
         num_mouse_bins=3,
-        max_mouse_move=25,
+        max_mouse_move=0.05,
         quantization_scheme="linear",
     )
     # make breaking blocks easier to learn
@@ -44,6 +45,8 @@ def wrapped_treechop_env(**kwargs):
     env = GrayScaleObservation(env, keep_dim=False)
     # facilitate learning dynamics
     env = FrameStack(env, 4)
+    # cast rewards to float32
+    env = ToFloat32Reward(env)
     return env
 
 
