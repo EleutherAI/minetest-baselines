@@ -470,7 +470,6 @@ def train(args=None):
                 args.capture_video,
                 args.video_frequency,
                 run_name,
-                dtime=0.05,
             )
             for i in range(args.num_envs)
         ],
