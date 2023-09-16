@@ -16,7 +16,6 @@ import optax
 import psutil
 from flax.training.train_state import TrainState
 from jax_smi import initialise_tracking
-from minetester.utils import start_xserver
 from stable_baselines3.common.buffers import ReplayBuffer
 from tensorboardX import SummaryWriter
 
@@ -59,6 +58,12 @@ def parse_args(args=None):
         nargs="?",
         const=True,
         help="whether to capture videos of the agent behavior",
+    )
+    parser.add_argument(
+        "--video-frequency",
+        type=int,
+        default=100,
+        help="number of episodes between video recordings",
     )
     parser.add_argument(
         "--save-model",
@@ -175,28 +180,27 @@ def parse_args(args=None):
     return args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(env_id, seed, idx, capture_video, video_frequency, run_name):
     def thunk():
-        # TODO train agent on diverse seeds / biomes / conditions
         env = gym.make(
             env_id,
-            world_seed=seed,
-            start_xvfb=False,
+            base_seed=seed + idx,
             headless=True,
+            start_xvfb=False,
             env_port=5555 + idx,
             server_port=30000 + idx,
-            x_display=4,
         )
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
-            if idx == 0 or idx < 0:
-                env = gym.wrappers.RecordVideo(
-                    env,
-                    f"videos/{run_name}",
-                    lambda x: x % 100 == 0,
-                )
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
+            env = gym.wrappers.RecordVideo(
+                env,
+                f"videos/{run_name}",
+                lambda x: x % video_frequency == 0,
+                name_prefix=f"env-{idx}",
+                disable_logger=True,
+            )
+        env.action_space.seed(seed + idx)
+        env.observation_space.seed(seed + idx)
         return env
 
     return thunk
@@ -211,10 +215,11 @@ def evaluate(
     Model: nn.Module,
     epsilon: float = 0.05,
     capture_video: bool = True,
-    seed=1,
+    video_frequency: int = 2,
+    seed: int = 1,
 ):
     envs = gym.vector.SyncVectorEnv(
-        [make_env(env_id, seed, -1, capture_video, run_name)],
+        [make_env(env_id, seed, 0, capture_video, video_frequency, run_name)],
     )
     obs, _ = envs.reset()
     model = Model(action_dim=envs.single_action_space.n)
@@ -237,9 +242,11 @@ def evaluate(
         next_obs, _, _, _, infos = envs.step(actions)
         if "final_info" in infos.keys():
             episodic_return = infos["final_info"][0]["episode"]["r"]
+            episodic_length = infos["final_info"][0]["episode"]["l"]
             print(
-                f"eval_episode={len(episodic_returns)},"
-                f"episodic_return={episodic_return}",
+                f"eval_episode={len(episodic_returns)}, "
+                f"episodic_return={episodic_return[0]}, "
+                f"episodic_length={episodic_length[0]}",
             )
             episodic_returns += [episodic_return]
         obs = next_obs
@@ -311,10 +318,16 @@ def train(args=None):
     key, q_key = jax.random.split(key, 2)
 
     # env setup
-    xserver = start_xserver(4)
     envs = gym.vector.SyncVectorEnv(
         [
-            make_env(args.env_id, args.seed, i, args.capture_video, run_name)
+            make_env(
+                args.env_id,
+                args.seed,
+                i,
+                args.capture_video,
+                args.video_frequency,
+                run_name,
+            )
             for i in range(args.num_envs)
         ],
     )
@@ -514,7 +527,7 @@ def train(args=None):
             model_path,
             make_env,
             args.env_id,
-            eval_episodes=1,
+            eval_episodes=10,
             run_name=f"{run_name}-eval",
             Model=QNetwork,
             epsilon=0.05,
@@ -537,7 +550,6 @@ def train(args=None):
                 f"videos/{run_name}-eval",
             )
 
-    xserver.terminate()
     writer.close()
 
 

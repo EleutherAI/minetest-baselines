@@ -1,5 +1,6 @@
 # adapted from cleanRL: https://github.com/vwxyzjn/cleanrl
 import argparse
+import gc
 import os
 import random
 import time
@@ -18,7 +19,6 @@ import psutil
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 from jax_smi import initialise_tracking
-from minetester.utils import start_xserver
 from tensorboardX import SummaryWriter
 
 import minetest_baselines.tasks  # noqa
@@ -79,6 +79,12 @@ def parse_args(args=None):
         nargs="?",
         const=True,
         help="whether to capture videos of the agent behavior",
+    )
+    parser.add_argument(
+        "--video-frequency",
+        type=int,
+        default=100,
+        help="number of episodes between video recordings",
     )
     parser.add_argument(
         "--save-model",
@@ -214,7 +220,7 @@ def parse_args(args=None):
     return args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(env_id, seed, idx, capture_video, video_frequency, run_name):
     def thunk():
         env = gym.make(
             env_id,
@@ -223,15 +229,15 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             start_xvfb=False,
             env_port=5555 + idx,
             server_port=30000 + idx,
-            x_display=4,
         )
         if capture_video:
-            if idx == 0 or idx < 0:
-                env = gym.wrappers.RecordVideo(
-                    env,
-                    f"videos/{run_name}",
-                    lambda x: x % 50 == 0,
-                )
+            env = gym.wrappers.RecordVideo(
+                env,
+                f"videos/{run_name}",
+                lambda x: x % video_frequency == 0,
+                name_prefix=f"env-{idx}",
+                disable_logger=True,
+            )
         env.action_space.seed(seed + idx)
         env.observation_space.seed(seed + idx)
         return env
@@ -247,13 +253,14 @@ def evaluate(
     run_name: str,
     Model: nn.Module,
     capture_video: bool = True,
-    seed=1,
+    video_frequency: int = 2,
+    seed: int = 1,
 ):
     envs = gym.vector.SyncVectorEnv(
-        [make_env(env_id, seed, -1, capture_video, run_name)],
+        [make_env(env_id, seed, 0, capture_video, video_frequency, run_name)],
     )
     Network, Actor, Critic = Model
-    next_obs, _ = envs.reset()
+    # next_obs, _ = envs.reset()
     network = Network()
     actor = Actor(action_dim=envs.single_action_space.n)
     critic = Critic()
@@ -308,6 +315,7 @@ def evaluate(
     episodic_returns = []
     for episode in range(eval_episodes):
         episodic_return = 0
+        episodic_length = 0
         next_obs, _ = envs.reset()
         terminated = np.array([False])
         truncated = np.array([False])
@@ -323,11 +331,13 @@ def evaluate(
                 np.array(actions),
             )
             episodic_return += reward[0]
+            episodic_length += 1
 
             if terminated[0] or truncated[0]:
                 print(
-                    f"eval_episode={len(episodic_returns)},"
-                    f"episodic_return={episodic_return}",
+                    f"eval_episode={len(episodic_returns)}, "
+                    f"episodic_return={episodic_return}, "
+                    f"episodic_length={episodic_length}",
                 )
                 episodic_returns.append(episodic_return)
 
@@ -451,10 +461,17 @@ def train(args=None):
     key, network_key, actor_key, critic_key = jax.random.split(key, 4)
 
     # env setup
-    xserver = start_xserver(4)
     envs = gym.vector.SyncVectorEnv(
         [
-            make_env(args.env_id, args.seed, i, args.capture_video, run_name)
+            make_env(
+                args.env_id,
+                args.seed,
+                i,
+                args.capture_video,
+                args.video_frequency,
+                run_name,
+                dtime=0.05,
+            )
             for i in range(args.num_envs)
         ],
     )
@@ -528,12 +545,12 @@ def train(args=None):
         new_episode_length = episode_stats.episode_lengths + 1
 
         episode_stats = episode_stats.replace(
-            episode_returns=(new_episode_return
-            * (1 - next_done)
-            * (1 - next_truncated)).astype(jnp.float32),
-            episode_lengths=(new_episode_length
-            * (1 - next_done)
-            * (1 - next_truncated)).astype(jnp.int32),
+            episode_returns=(
+                new_episode_return * (1 - next_done) * (1 - next_truncated)
+            ).astype(jnp.float32),
+            episode_lengths=(
+                new_episode_length * (1 - next_done) * (1 - next_truncated)
+            ).astype(jnp.int32),
             # only update the `returned_episode_returns` if the episode is done
             returned_episode_returns=jnp.where(
                 next_done + next_truncated,
@@ -546,6 +563,7 @@ def train(args=None):
                 episode_stats.returned_episode_lengths,
             ),
         )
+        gc.collect()
         return episode_stats, (next_obs, reward, next_done)
 
     # ALGO Logic: Storage setup
@@ -750,15 +768,13 @@ def train(args=None):
             )
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            # TODO make minetester return float32 rewards
-            with jax.experimental.enable_x64():
-                episode_stats, (next_obs, reward, next_done) = jax.experimental.io_callback(
-                    step_env_wrapped,
-                    (episode_stats, (next_obs, dummy_reward, next_done)),
-                    episode_stats,
-                    action,
-                )
-                storage = storage.replace(rewards=storage.rewards.at[step].set(reward))
+            episode_stats, (next_obs, reward, next_done) = jax.experimental.io_callback(
+                step_env_wrapped,
+                (episode_stats, (next_obs, dummy_reward, next_done)),
+                episode_stats,
+                action,
+            )
+            storage = storage.replace(rewards=storage.rewards.at[step].set(reward))
         return (
             agent_state,
             episode_stats,
@@ -770,6 +786,7 @@ def train(args=None):
         )
 
     for update in range(1, args.num_updates + 1):
+        # print(psutil.Process(os.getpid()).memory_info().rss / 1024 ** 2)
         update_time_start = time.time()
         (
             agent_state,
@@ -797,7 +814,14 @@ def train(args=None):
         avg_episodic_return = np.mean(
             jax.device_get(episode_stats.returned_episode_returns),
         )
-        print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}")
+        avg_episodic_length = np.mean(
+            jax.device_get(episode_stats.returned_episode_lengths),
+        )
+        print(
+            f"global_step={global_step}, "
+            f"avg_episodic_return={avg_episodic_return}, "
+            f"avg_episodic_length={avg_episodic_length}",
+        )
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         writer.add_scalar(
@@ -807,7 +831,7 @@ def train(args=None):
         )
         writer.add_scalar(
             "charts/avg_episodic_length",
-            np.mean(jax.device_get(episode_stats.returned_episode_lengths)),
+            avg_episodic_length,
             global_step,
         )
         # writer.add_scalar("charts/learning_rate",
@@ -857,9 +881,10 @@ def train(args=None):
             model_path,
             make_env,
             args.env_id,
-            eval_episodes=1,
+            eval_episodes=10,
             run_name=f"{run_name}-eval",
             Model=(Network, Actor, Critic),
+            seed=args.seed,
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
@@ -878,7 +903,6 @@ def train(args=None):
                 f"videos/{run_name}-eval",
             )
 
-    xserver.terminate()
     writer.close()
 
 
