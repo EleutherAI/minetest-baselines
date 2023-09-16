@@ -1,9 +1,10 @@
 # Data
-data/*
+/data/*
+/artefacts/
 events.out.*
-videos/*
-wandb/*
-runs
+/videos/*
+/wandb/*
+/runs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
