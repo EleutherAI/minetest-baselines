@@ -2,7 +2,7 @@ from setuptools import setup
 
 UTILS = [
     "wandb>=0.13.11",  # ensure gymnasium support
-    "huggingface_hub",
+    "huggingface_hub==0.11.1",
     "tensorboardX",
     "tensorboard",
     "opencv-python",
@@ -10,6 +10,8 @@ UTILS = [
     "jax-smi",
     "protobuf==3.20.1",
     "moviepy",
+    "lz4",
+    "tenacity==8.2.2",
 ]
 TORCH = ["torch", "stable-baselines3"]
 JAX = ["jax", "optax", "flax"]

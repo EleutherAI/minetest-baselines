@@ -44,7 +44,7 @@ def wrapped_treechop_env(**kwargs):
     env = ResizeObservation(env, (64, 64))
     env = GrayScaleObservation(env, keep_dim=False)
     # facilitate learning dynamics
-    env = FrameStack(env, 4)
+    env = FrameStack(env, 4, lz4_compress=True)
     # cast rewards to float32
     env = ToFloat32Reward(env)
     return env
