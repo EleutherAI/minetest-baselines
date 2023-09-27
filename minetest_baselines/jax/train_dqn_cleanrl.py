@@ -5,7 +5,6 @@ import random
 import time
 from distutils.util import strtobool
 from typing import Callable
-
 import flax
 import flax.linen as nn
 import gymnasium as gym
@@ -21,6 +20,7 @@ from tensorboardX import SummaryWriter
 
 import minetest_baselines.tasks  # noqa
 
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.3"
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
@@ -192,13 +192,14 @@ def make_env(env_id, seed, idx, capture_video, video_frequency, run_name):
         )
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
-            env = gym.wrappers.RecordVideo(
-                env,
-                f"videos/{run_name}",
-                lambda x: x % video_frequency == 0,
-                name_prefix=f"env-{idx}",
-                disable_logger=True,
-            )
+            if idx == 0:
+                env = gym.wrappers.RecordVideo(
+                    env,
+                    f"videos/{run_name}",
+                    lambda x: x % video_frequency == 0,
+                    name_prefix=f"env-{idx}",
+                    disable_logger=True,
+                )
         env.action_space.seed(seed + idx)
         env.observation_space.seed(seed + idx)
         return env
