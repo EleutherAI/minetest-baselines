@@ -48,7 +48,7 @@ def push_to_hub(
 
     # Step 3: Generate the model card
     model_card = f"""
-#**{algo_name}** Agent Playing **{args.env_id}**
+# **{algo_name}** Agent Playing **{args.env_id}**
 
 This is a trained model of a {algo_name} agent playing {args.env_id}.
 The model was trained by using
