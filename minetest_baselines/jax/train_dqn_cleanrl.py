@@ -5,10 +5,9 @@ import random
 import time
 from distutils.util import strtobool
 from typing import Callable
-
 import flax
 import flax.linen as nn
-import gym
+import gymnasium as gym
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -16,12 +15,12 @@ import optax
 import psutil
 from flax.training.train_state import TrainState
 from jax_smi import initialise_tracking
-from minetester.utils import start_xserver
 from stable_baselines3.common.buffers import ReplayBuffer
 from tensorboardX import SummaryWriter
 
 import minetest_baselines.tasks  # noqa
 
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.3"
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
@@ -59,6 +58,12 @@ def parse_args(args=None):
         nargs="?",
         const=True,
         help="whether to capture videos of the agent behavior",
+    )
+    parser.add_argument(
+        "--video-frequency",
+        type=int,
+        default=100,
+        help="number of episodes between video recordings",
     )
     parser.add_argument(
         "--save-model",
@@ -175,28 +180,28 @@ def parse_args(args=None):
     return args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(env_id, seed, idx, capture_video, video_frequency, run_name):
     def thunk():
-        # TODO train agent on diverse seeds / biomes / conditions
         env = gym.make(
             env_id,
-            world_seed=seed,
-            start_xvfb=False,
+            base_seed=seed + idx,
             headless=True,
+            start_xvfb=False,
             env_port=5555 + idx,
             server_port=30000 + idx,
-            x_display=4,
         )
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
-            if idx == 0 or idx < 0:
+            if idx == 0:
                 env = gym.wrappers.RecordVideo(
                     env,
                     f"videos/{run_name}",
-                    lambda x: x % 100 == 0,
+                    lambda x: x % video_frequency == 0,
+                    name_prefix=f"env-{idx}",
+                    disable_logger=True,
                 )
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
+        env.action_space.seed(seed + idx)
+        env.observation_space.seed(seed + idx)
         return env
 
     return thunk
@@ -211,12 +216,13 @@ def evaluate(
     Model: nn.Module,
     epsilon: float = 0.05,
     capture_video: bool = True,
-    seed=1,
+    video_frequency: int = 2,
+    seed: int = 1,
 ):
     envs = gym.vector.SyncVectorEnv(
-        [make_env(env_id, seed, -1, capture_video, run_name)],
+        [make_env(env_id, seed, 0, capture_video, video_frequency, run_name)],
     )
-    obs = envs.reset()
+    obs, _ = envs.reset()
     model = Model(action_dim=envs.single_action_space.n)
     q_key = jax.random.PRNGKey(seed)
     params = model.init(q_key, obs)
@@ -234,14 +240,16 @@ def evaluate(
             q_values = model.apply(params, obs)
             actions = q_values.argmax(axis=-1)
             actions = jax.device_get(actions)
-        next_obs, _, _, infos = envs.step(actions)
-        for info in infos:
-            if "episode" in info.keys():
-                print(
-                    f"eval_episode={len(episodic_returns)},"
-                    f"episodic_return={info['episode']['r']}",
-                )
-                episodic_returns += [info["episode"]["r"]]
+        next_obs, _, _, _, infos = envs.step(actions)
+        if "final_info" in infos.keys():
+            episodic_return = infos["final_info"][0]["episode"]["r"]
+            episodic_length = infos["final_info"][0]["episode"]["l"]
+            print(
+                f"eval_episode={len(episodic_returns)}, "
+                f"episodic_return={episodic_return[0]}, "
+                f"episodic_length={episodic_length[0]}",
+            )
+            episodic_returns += [episodic_return]
         obs = next_obs
 
     return episodic_returns
@@ -311,10 +319,16 @@ def train(args=None):
     key, q_key = jax.random.split(key, 2)
 
     # env setup
-    xserver = start_xserver(4)
     envs = gym.vector.SyncVectorEnv(
         [
-            make_env(args.env_id, args.seed, i, args.capture_video, run_name)
+            make_env(
+                args.env_id,
+                args.seed,
+                i,
+                args.capture_video,
+                args.video_frequency,
+                run_name,
+            )
             for i in range(args.num_envs)
         ],
     )
@@ -323,7 +337,7 @@ def train(args=None):
         gym.spaces.Discrete,
     ), "only discrete action space is supported"
 
-    obs = envs.reset()
+    obs, _ = envs.reset()
 
     q_network = QNetwork(action_dim=envs.single_action_space.n)
 
@@ -380,8 +394,16 @@ def train(args=None):
     initialise_tracking()
     start_time = time.time()
 
+    def info_dict_to_array(info: dict):
+        dim = list(info.values())[0].shape[0]
+        ar = [{} for _ in range(dim)]
+        for key, value_ar in info.items():
+            for idx, element in enumerate(value_ar):
+                ar[idx][key] = element
+        return ar
+
     # TRY NOT TO MODIFY: start the game
-    obs = envs.reset()
+    obs, _ = envs.reset()
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(
@@ -400,42 +422,49 @@ def train(args=None):
             actions = jax.device_get(actions)
 
         # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rewards, dones, infos = envs.step(actions)
+        next_obs, rewards, dones, truncated, infos = envs.step(actions)
+        infos.update({"TimeLimit.truncated": truncated, "terminated": dones})
+        array_infos = info_dict_to_array(infos)
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        for info in infos:
-            if "episode" in info.keys():
-                print(
-                    f"global_step={global_step},"
-                    f"episodic_return={info['episode']['r']}",
-                )
-                writer.add_scalar(
-                    "charts/episodic_return",
-                    info["episode"]["r"],
-                    global_step,
-                )
-                writer.add_scalar(
-                    "charts/episodic_length",
-                    info["episode"]["l"],
-                    global_step,
-                )
-                writer.add_scalar("charts/epsilon", epsilon, global_step)
-                break
+        if "final_info" in infos.keys():
+            # compute mean episodic return and length across envs
+            final_infos = infos["final_info"]
+            mean_episodic_return = np.mean(
+                [final_info["episode"]["r"] for final_info in final_infos],
+            )
+            mean_episodic_length = np.mean(
+                [final_info["episode"]["l"] for final_info in final_infos],
+            )
+            print(
+                f"global_step={global_step},"
+                f"mean_episodic_return={mean_episodic_return}",
+            )
+            writer.add_scalar(
+                "charts/episodic_return",
+                mean_episodic_return,
+                global_step,
+            )
+            writer.add_scalar(
+                "charts/episodic_length",
+                mean_episodic_length,
+                global_step,
+            )
+            writer.add_scalar("charts/epsilon", epsilon, global_step)
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
         real_next_obs = next_obs.copy()
         for idx, d in enumerate(dones):
             if d:
-                real_next_obs[idx] = infos[idx]["terminal_observation"]
-        for idx in range(obs.shape[0]):
-            rb.add(
-                obs[idx],
-                real_next_obs[idx],
-                actions[idx],
-                rewards[idx],
-                dones[idx],
-                np.array([infos[idx]]),
-            )
+                real_next_obs[idx] = infos["final_observation"][idx]
+        rb.add(
+            obs,
+            real_next_obs,
+            actions,
+            rewards,
+            dones,
+            array_infos,
+        )
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -499,7 +528,7 @@ def train(args=None):
             model_path,
             make_env,
             args.env_id,
-            eval_episodes=1,
+            eval_episodes=10,
             run_name=f"{run_name}-eval",
             Model=QNetwork,
             epsilon=0.05,
@@ -522,7 +551,6 @@ def train(args=None):
                 f"videos/{run_name}-eval",
             )
 
-    xserver.terminate()
     writer.close()
 
 

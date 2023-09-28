@@ -1,5 +1,6 @@
 # adapted from cleanRL: https://github.com/vwxyzjn/cleanrl
 import argparse
+import gc
 import os
 import random
 import time
@@ -9,7 +10,7 @@ from typing import Callable, Sequence
 
 import flax
 import flax.linen as nn
-import gym
+import gymnasium as gym
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -18,12 +19,11 @@ import psutil
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 from jax_smi import initialise_tracking
-from minetester.utils import start_xserver
 from tensorboardX import SummaryWriter
 
 import minetest_baselines.tasks  # noqa
 
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.3"
 # see https://github.com/google/jax/discussions/6332#discussioncomment-1279991
 
 
@@ -79,6 +79,12 @@ def parse_args(args=None):
         nargs="?",
         const=True,
         help="whether to capture videos of the agent behavior",
+    )
+    parser.add_argument(
+        "--video-frequency",
+        type=int,
+        default=100,
+        help="number of episodes between video recordings",
     )
     parser.add_argument(
         "--save-model",
@@ -214,7 +220,7 @@ def parse_args(args=None):
     return args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(env_id, seed, idx, capture_video, video_frequency, run_name):
     def thunk():
         env = gym.make(
             env_id,
@@ -223,14 +229,15 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             start_xvfb=False,
             env_port=5555 + idx,
             server_port=30000 + idx,
-            x_display=4,
         )
         if capture_video:
-            if idx == 0 or idx < 0:
+            if idx == 0:
                 env = gym.wrappers.RecordVideo(
                     env,
                     f"videos/{run_name}",
-                    lambda x: x % 50 == 0,
+                    lambda x: x % video_frequency == 0,
+                    name_prefix=f"env-{idx}",
+                    disable_logger=True,
                 )
         env.action_space.seed(seed + idx)
         env.observation_space.seed(seed + idx)
@@ -247,13 +254,14 @@ def evaluate(
     run_name: str,
     Model: nn.Module,
     capture_video: bool = True,
-    seed=1,
+    video_frequency: int = 2,
+    seed: int = 1,
 ):
     envs = gym.vector.SyncVectorEnv(
-        [make_env(env_id, seed, -1, capture_video, run_name)],
+        [make_env(env_id, seed, 0, capture_video, video_frequency, run_name)],
     )
     Network, Actor, Critic = Model
-    next_obs = envs.reset()
+    # next_obs, _ = envs.reset()
     network = Network()
     actor = Actor(action_dim=envs.single_action_space.n)
     critic = Critic()
@@ -308,23 +316,29 @@ def evaluate(
     episodic_returns = []
     for episode in range(eval_episodes):
         episodic_return = 0
-        next_obs = envs.reset()
-        terminated = False
+        episodic_length = 0
+        next_obs, _ = envs.reset()
+        terminated = np.array([False])
+        truncated = np.array([False])
 
-        while not terminated:
+        while not (terminated[0] or truncated[0]):
             actions, key = get_action_and_value(
                 network_params,
                 actor_params,
                 next_obs,
                 key,
             )
-            next_obs, reward, terminated, infos = envs.step(np.array(actions))
+            next_obs, reward, terminated, truncated, infos = envs.step(
+                np.array(actions),
+            )
             episodic_return += reward[0]
+            episodic_length += 1
 
-            if terminated[0]:
+            if terminated[0] or truncated[0]:
                 print(
-                    f"eval_episode={len(episodic_returns)},"
-                    f"episodic_return={episodic_return}",
+                    f"eval_episode={len(episodic_returns)}, "
+                    f"episodic_return={episodic_return}, "
+                    f"episodic_length={episodic_length}",
                 )
                 episodic_returns.append(episodic_return)
 
@@ -448,10 +462,16 @@ def train(args=None):
     key, network_key, actor_key, critic_key = jax.random.split(key, 4)
 
     # env setup
-    xserver = start_xserver(4)
     envs = gym.vector.SyncVectorEnv(
         [
-            make_env(args.env_id, args.seed, i, args.capture_video, run_name)
+            make_env(
+                args.env_id,
+                args.seed,
+                i,
+                args.capture_video,
+                args.video_frequency,
+                run_name,
+            )
             for i in range(args.num_envs)
         ],
     )
@@ -459,6 +479,11 @@ def train(args=None):
         envs.single_action_space,
         gym.spaces.Discrete,
     ), "only discrete action space is supported"
+
+    def step_env_wrapped(action, step):
+        (next_obs, reward, next_done, next_truncated, _) = envs.step(action)
+        reward = reward.astype(jnp.float32)
+        return next_obs, reward, next_done, next_truncated
 
     episode_stats = EpisodeStatistics(
         episode_returns=jnp.zeros(args.num_envs, dtype=jnp.float32),
@@ -516,47 +541,6 @@ def train(args=None):
     network.apply = jax.jit(network.apply)
     actor.apply = jax.jit(actor.apply)
     critic.apply = jax.jit(critic.apply)
-
-    def array2dict(array):
-        keys = ["terminated", "TimeLimit.truncated"]
-        dict_ret = {}
-        for key in keys:
-            key_ar = []
-            for di in array:
-                if key in di:
-                    key_ar.append(di[key])
-                else:
-                    key_ar.append(False)
-            key_ar = np.array(key_ar)
-            dict_ret[key] = key_ar
-        return dict_ret
-
-    def step_env_wrapped(episode_stats, action):
-        (next_obs, reward, next_done, info) = envs.step(action)
-        info = array2dict(info)
-        new_episode_return = episode_stats.episode_returns + reward
-        new_episode_length = episode_stats.episode_lengths + 1
-
-        episode_stats = episode_stats.replace(
-            episode_returns=(new_episode_return)
-            * (1 - info["terminated"])
-            * (1 - info["TimeLimit.truncated"]),
-            episode_lengths=(new_episode_length)
-            * (1 - info["terminated"])
-            * (1 - info["TimeLimit.truncated"]),
-            # only update the `returned_episode_returns` if the episode is done
-            returned_episode_returns=jnp.where(
-                info["terminated"] + info["TimeLimit.truncated"],
-                new_episode_return,
-                episode_stats.returned_episode_returns,
-            ),
-            returned_episode_lengths=jnp.where(
-                info["terminated"] + info["TimeLimit.truncated"],
-                new_episode_length,
-                episode_stats.returned_episode_lengths,
-            ),
-        )
-        return episode_stats, (next_obs, reward, next_done, info)
 
     # ALGO Logic: Storage setup
     storage = Storage(
@@ -662,79 +646,74 @@ def train(args=None):
         )
         return storage
 
+
+    def ppo_loss(params, x, a, logp, mb_advantages, mb_returns):
+        newlogprob, entropy, newvalue = get_action_and_value2(params, x, a)
+        logratio = newlogprob - logp
+        ratio = jnp.exp(logratio)
+        approx_kl = ((ratio - 1) - logratio).mean()
+
+        if args.norm_adv:
+            mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+
+        # Policy loss
+        pg_loss1 = -mb_advantages * ratio
+        pg_loss2 = -mb_advantages * jnp.clip(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+        pg_loss = jnp.maximum(pg_loss1, pg_loss2).mean()
+
+        # Value loss
+        v_loss = 0.5 * ((newvalue - mb_returns) ** 2).mean()
+
+        entropy_loss = entropy.mean()
+        loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+        return loss, (pg_loss, v_loss, entropy_loss, jax.lax.stop_gradient(approx_kl))
+
+    ppo_loss_grad_fn = jax.value_and_grad(ppo_loss, has_aux=True)
+
     @jax.jit
     def update_ppo(
         agent_state: TrainState,
         storage: Storage,
         key: jax.random.PRNGKey,
     ):
-        b_obs = storage.obs.reshape((-1,) + envs.single_observation_space.shape)
-        b_logprobs = storage.logprobs.reshape(-1)
-        b_actions = storage.actions.reshape((-1,) + envs.single_action_space.shape)
-        b_advantages = storage.advantages.reshape(-1)
-        b_returns = storage.returns.reshape(-1)
-
-        def ppo_loss(params, x, a, logp, mb_advantages, mb_returns):
-            newlogprob, entropy, newvalue = get_action_and_value2(params, x, a)
-            logratio = newlogprob - logp
-            ratio = jnp.exp(logratio)
-            approx_kl = ((ratio - 1) - logratio).mean()
-
-            if args.norm_adv:
-                mb_advantages = (mb_advantages - mb_advantages.mean()) / (
-                    mb_advantages.std() + 1e-8
-                )
-
-            # Policy loss
-            pg_loss1 = -mb_advantages * ratio
-            pg_loss2 = -mb_advantages * jnp.clip(
-                ratio,
-                1 - args.clip_coef,
-                1 + args.clip_coef,
-            )
-            pg_loss = jnp.maximum(pg_loss1, pg_loss2).mean()
-
-            # Value loss
-            v_loss = 0.5 * ((newvalue - mb_returns) ** 2).mean()
-
-            entropy_loss = entropy.mean()
-            loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-            return loss, (
-                pg_loss,
-                v_loss,
-                entropy_loss,
-                jax.lax.stop_gradient(approx_kl),
-            )
-
-        ppo_loss_grad_fn = jax.value_and_grad(ppo_loss, has_aux=True)
-        for _ in range(args.update_epochs):
+        def update_epoch(carry, unused_inp):
+            agent_state, key = carry
             key, subkey = jax.random.split(key)
-            b_inds = jax.random.permutation(subkey, args.batch_size, independent=True)
-            for start in range(0, args.batch_size, args.minibatch_size):
-                end = start + args.minibatch_size
-                mb_inds = b_inds[start:end]
-                (
-                    loss,
-                    (pg_loss, v_loss, entropy_loss, approx_kl),
-                ), grads = ppo_loss_grad_fn(
+
+            def flatten(x):
+                return x.reshape((-1,) + x.shape[2:])
+
+            # taken from: https://github.com/google/brax/blob/main/brax/training/agents/ppo/train.py
+            def convert_data(x: jnp.ndarray):
+                x = jax.random.permutation(subkey, x)
+                x = jnp.reshape(x, (args.num_minibatches, -1) + x.shape[1:])
+                return x
+
+            flatten_storage = jax.tree_map(flatten, storage)
+            shuffled_storage = jax.tree_map(convert_data, flatten_storage)
+
+            def update_minibatch(agent_state, minibatch):
+                (loss, (pg_loss, v_loss, entropy_loss, approx_kl)), grads = ppo_loss_grad_fn(
                     agent_state.params,
-                    b_obs[mb_inds],
-                    b_actions[mb_inds],
-                    b_logprobs[mb_inds],
-                    b_advantages[mb_inds],
-                    b_returns[mb_inds],
+                    minibatch.obs,
+                    minibatch.actions,
+                    minibatch.logprobs,
+                    minibatch.advantages,
+                    minibatch.returns,
                 )
                 agent_state = agent_state.apply_gradients(grads=grads)
+                return agent_state, (loss, pg_loss, v_loss, entropy_loss, approx_kl, grads)
+
+            agent_state, (loss, pg_loss, v_loss, entropy_loss, approx_kl, grads) = jax.lax.scan(
+                update_minibatch, agent_state, shuffled_storage
+            )
+            return (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl, grads)
+
+        (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl, grads) = jax.lax.scan(
+            update_epoch, (agent_state, key), (), length=args.update_epochs
+        )
         return agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, key
 
-    # TRY NOT TO MODIFY: start the game
-    initialise_tracking()
-    global_step = 0
-    start_time = time.time()
-    next_obs = envs.reset()
-    next_done = jnp.zeros(args.num_envs, dtype=jax.numpy.bool_)
-
-    # FIXME readd @jax.jit
     def rollout(
         agent_state,
         episode_stats,
@@ -756,9 +735,28 @@ def train(args=None):
             )
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            episode_stats, (next_obs, reward, next_done, _) = step_env_wrapped(
-                episode_stats,
-                action,
+            next_obs, reward, next_done, next_truncated = step_env_wrapped(action, step)
+            new_episode_return = episode_stats.episode_returns + reward
+            new_episode_length = episode_stats.episode_lengths + 1
+
+            episode_stats = episode_stats.replace(
+                episode_returns=(
+                    new_episode_return * (1 - next_done) * (1 - next_truncated)
+                ).astype(jnp.float32),
+                episode_lengths=(
+                    new_episode_length * (1 - next_done) * (1 - next_truncated)
+                ).astype(jnp.int32),
+                # only update the `returned_episode_returns` if the episode is done
+                returned_episode_returns=jnp.where(
+                    next_done + next_truncated,
+                    new_episode_return,
+                    episode_stats.returned_episode_returns,
+                ),
+                returned_episode_lengths=jnp.where(
+                    next_done + next_truncated,
+                    new_episode_length,
+                    episode_stats.returned_episode_lengths,
+                ),
             )
             storage = storage.replace(rewards=storage.rewards.at[step].set(reward))
         return (
@@ -771,7 +769,18 @@ def train(args=None):
             global_step,
         )
 
+
+    # TRY NOT TO MODIFY: start the game
+    initialise_tracking()
+    global_step = 0
+    envs.reset()
+    # intial reset of the environments
+    next_obs, _ = envs.reset()
+    next_done = jnp.zeros(args.num_envs, dtype=jnp.bool_)
+
+    start_time = time.time()
     for update in range(1, args.num_updates + 1):
+        # print(psutil.Process(os.getpid()).memory_info().rss / 1024 ** 2)
         update_time_start = time.time()
         (
             agent_state,
@@ -799,7 +808,14 @@ def train(args=None):
         avg_episodic_return = np.mean(
             jax.device_get(episode_stats.returned_episode_returns),
         )
-        print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}")
+        avg_episodic_length = np.mean(
+            jax.device_get(episode_stats.returned_episode_lengths),
+        )
+        print(
+            f"global_step={global_step}, "
+            f"avg_episodic_return={avg_episodic_return}, "
+            f"avg_episodic_length={avg_episodic_length}",
+        )
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         writer.add_scalar(
@@ -809,16 +825,16 @@ def train(args=None):
         )
         writer.add_scalar(
             "charts/avg_episodic_length",
-            np.mean(jax.device_get(episode_stats.returned_episode_lengths)),
+            avg_episodic_length,
             global_step,
         )
         # writer.add_scalar("charts/learning_rate",
         # agent_state.opt_state[1].hyperparams["learning_rate"].item(), global_step)
-        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-        writer.add_scalar("losses/loss", loss.item(), global_step)
+        writer.add_scalar("losses/value_loss", v_loss.mean().item(), global_step)
+        writer.add_scalar("losses/policy_loss", pg_loss.mean().item(), global_step)
+        writer.add_scalar("losses/entropy", entropy_loss.mean().item(), global_step)
+        writer.add_scalar("losses/approx_kl", approx_kl.mean().item(), global_step)
+        writer.add_scalar("losses/loss", loss.mean().item(), global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar(
             "charts/SPS",
@@ -862,6 +878,7 @@ def train(args=None):
             eval_episodes=10,
             run_name=f"{run_name}-eval",
             Model=(Network, Actor, Critic),
+            seed=args.seed,
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
@@ -880,7 +897,6 @@ def train(args=None):
                 f"videos/{run_name}-eval",
             )
 
-    xserver.terminate()
     writer.close()
 
 

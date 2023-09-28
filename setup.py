@@ -1,14 +1,17 @@
 from setuptools import setup
 
 UTILS = [
-    "wandb",
-    "huggingface_hub",
+    "wandb>=0.13.11",  # ensure gymnasium support
+    "huggingface_hub==0.11.1",
     "tensorboardX",
     "tensorboard",
     "opencv-python",
     "imageio-ffmpeg",
     "jax-smi",
     "protobuf==3.20.1",
+    "moviepy",
+    "lz4",
+    "tenacity==8.2.2",
 ]
 TORCH = ["torch", "stable-baselines3"]
 JAX = ["jax", "optax", "flax"]

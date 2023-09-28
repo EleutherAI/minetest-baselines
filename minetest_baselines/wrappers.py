@@ -1,6 +1,6 @@
 from typing import List, Set
 
-import gym
+import gymnasium as gym
 import numpy as np
 from minetester.minetest_env import Minetest
 from minetester.utils import KEY_MAP, NOOP_ACTION
@@ -18,8 +18,8 @@ class MinetestWrapper(gym.Wrapper):
 class AlwaysDig(MinetestWrapper):
     def step(self, action):
         action["DIG"] = True
-        obs, rew, done, info = self.env.step(action)
-        return obs, rew, done, info
+        obs, rew, done, truncated, info = self.env.step(action)
+        return obs, rew, done, truncated, info
 
 
 class PenalizeJumping(MinetestWrapper):
@@ -31,9 +31,9 @@ class PenalizeJumping(MinetestWrapper):
         penalty = 0
         if action["JUMP"]:
             penalty = -self.jump_penalty
-        obs, rew, done, info = self.env.step(action)
+        obs, rew, done, truncated, info = self.env.step(action)
         rew += penalty
-        return obs, rew, done, info
+        return obs, rew, done, truncated, info
 
 
 class FlattenMultiDiscreteActions(gym.Wrapper):
@@ -145,7 +145,7 @@ class DiscreteMouseAction(MinetestWrapper):
         self,
         env: gym.Env,
         num_mouse_bins: int = 5,
-        max_mouse_move: int = 50,
+        max_mouse_move: float = 0.1,
         quantization_scheme: str = "linear",
         mu: float = 5.0,
     ):
@@ -204,23 +204,30 @@ class DiscreteMouseAction(MinetestWrapper):
             np.unravel_index(mouse_action, (self.num_mouse_bins, self.num_mouse_bins)),
         )
         undisc_mouse_action = self.undiscretize(xy_action)
-        action["MOUSE"] = undisc_mouse_action.astype(int)
+        action["MOUSE"] = undisc_mouse_action
         return self.env.step(action)
+
+
+class ToFloat32Reward(gym.Wrapper):
+    def step(self, action):
+        obs, rew, done, truncated, info = self.env.step(action)
+        rew = np.float32(rew)
+        return obs, rew, done, truncated, info
 
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
-    env = Minetest(seed=1)
+    env = Minetest()
 
     env = DiscreteMouseAction(
         env,
         num_mouse_bins=5,
-        max_mouse_move=50,
+        max_mouse_move=0.1,
         quantization_scheme="linear",
     )
     # Visualize the discretization of mouse actions
-    x = np.linspace(-80, 80, 1000)  # in pixels
+    x = np.linspace(-0.2, 0.2, 1000)  # in relative screen space
     x0 = np.zeros_like(x)
     x = np.vstack((x, x0))
     x_disc = env.discretize(x)
@@ -228,7 +235,7 @@ if __name__ == "__main__":
     x_recon = env.undiscretize(x_disc)
     plt.scatter(x_recon[0, :], x_disc[0, :], label="undiscretized")
     plt.grid()
-    plt.xlabel("pixels")
+    plt.xlabel("relative screen space")
     plt.ylabel("bins")
     plt.legend()
     plt.show()
